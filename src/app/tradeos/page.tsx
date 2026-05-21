@@ -1,20 +1,24 @@
 "use client";
 export const dynamic = "force-dynamic";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
-// ── Supabase client (lazy init to avoid SSR prerender crash) ──────────────
-let _sb: SupabaseClient | null = null;
-function getSb(): SupabaseClient {
-  if (!_sb) {
-    _sb = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
+// ── Supabase client factory (safe across SSR + missing env vars) ──────────
+function makeSb(): SupabaseClient | null {
+  if (typeof window === "undefined") return null;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key) {
+    console.error("[TradeOS] Missing Supabase env vars");
+    return null;
   }
-  return _sb;
+  try {
+    return createClient(url, key);
+  } catch (e) {
+    console.error("[TradeOS] Supabase init failed:", e);
+    return null;
+  }
 }
-const sb = typeof window !== "undefined" ? getSb() : null as unknown as SupabaseClient;
 
 // ── Colors ────────────────────────────────────────────────────────────────
 const C = {
@@ -39,7 +43,7 @@ interface Trade {
   holdTime: number; holdDisplay: string;
   grade: string; setup: string; emotion: string; lesson: string;
   confidence: number; exitType: string; mistakes: string[];
-  sl: number; target: number; rr: string;
+  sl: number; target: number; rr: string | number;
   journaled?: boolean;
 }
 
@@ -54,7 +58,9 @@ interface Cfg {
 }
 
 export default function TradeOS() {
+  const sb = useMemo(() => makeSb(), []);
   const [authState, setAuthState] = useState<"loading"|"auth"|"connect-broker"|"app">("loading");
+  const [configError, setConfigError] = useState<string>("");
   const [user, setUser] = useState<User | null>(null);
   const [authMode, setAuthMode] = useState<"login"|"signup">("login");
   const [authError, setAuthError] = useState("");
@@ -94,18 +100,45 @@ export default function TradeOS() {
 
   // Auth state
   useEffect(() => {
-    sb.auth.onAuthStateChange(async (_, session) => {
+    if (!sb) {
+      setConfigError("Supabase is not configured. Check NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in Vercel env vars, then redeploy.");
+      setAuthState("auth");
+      return;
+    }
+    // Check current session immediately
+    sb.auth.getSession().then(async ({ data }) => {
+      const session = data.session;
       if (session?.user) {
         setUser(session.user);
-        const res = await fetch("/api/broker", { headers: { Authorization: `Bearer ${session.access_token}` } });
-        const data = await res.json();
-        setAuthState(data.connections?.length > 0 ? "app" : "connect-broker");
+        try {
+          const res = await fetch("/api/broker", { headers: { Authorization: `Bearer ${session.access_token}` } });
+          const d = await res.json();
+          setAuthState(d.connections?.length > 0 ? "app" : "connect-broker");
+        } catch {
+          setAuthState("connect-broker");
+        }
+      } else {
+        setAuthState("auth");
+      }
+    });
+    // Listen for future changes
+    const { data: sub } = sb.auth.onAuthStateChange(async (_, session) => {
+      if (session?.user) {
+        setUser(session.user);
+        try {
+          const res = await fetch("/api/broker", { headers: { Authorization: `Bearer ${session.access_token}` } });
+          const d = await res.json();
+          setAuthState(d.connections?.length > 0 ? "app" : "connect-broker");
+        } catch {
+          setAuthState("connect-broker");
+        }
       } else {
         setAuthState("auth");
         setUser(null);
       }
     });
-  }, []);
+    return () => { sub.subscription.unsubscribe(); };
+  }, [sb]);
 
   const avail = fund?.availabelBalance || 0;
   const lossLimit = cfg.lossType === "percent" ? avail * (cfg.lossVal / 100) : cfg.lossVal;
@@ -137,6 +170,7 @@ export default function TradeOS() {
 
   // ── API helpers ─────────────────────────────────────────────────────────
   const getJwt = async () => {
+    if (!sb) return "";
     const { data } = await sb.auth.getSession();
     return data.session?.access_token || "";
   };
@@ -249,6 +283,7 @@ export default function TradeOS() {
           <div style={{ fontSize: 24, fontWeight: 800, marginBottom: 4 }}>Niyam TradeOS</div>
           <div style={{ fontSize: 13, color: C.ts }}>{authMode === "login" ? "Login to your account" : "Create your account"}</div>
         </div>
+        {configError && <div style={{ background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 10, padding: "10px 14px", color: C.ambL, fontSize: 12, marginBottom: 12, lineHeight: 1.5 }}>⚠ {configError}</div>}
         {authError && <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "10px 14px", color: C.redL, fontSize: 13, marginBottom: 12 }}>{authError}</div>}
         {authMode === "signup" && (
           <div style={{ marginBottom: 14 }}>
@@ -272,6 +307,7 @@ export default function TradeOS() {
             const name = (document.getElementById("auth_name") as HTMLInputElement)?.value?.trim();
             if (!email || !pass) { setAuthError("Please enter email and password"); return; }
             setAuthLoading(true); setAuthError("");
+            if (!sb) { setAuthError("Supabase not configured. Check env vars."); setAuthLoading(false); return; }
             if (authMode === "login") {
               const { error } = await sb.auth.signInWithPassword({ email, password: pass });
               if (error) setAuthError(error.message);
@@ -340,7 +376,7 @@ export default function TradeOS() {
           </div>
         </div>
         <div style={{ textAlign: "center", marginTop: 20 }}>
-          <button onClick={async () => { await sb.auth.signOut(); setAuthState("auth"); }}
+          <button onClick={async () => { if (sb) await sb.auth.signOut(); setAuthState("auth"); }}
             style={{ background: "none", border: "none", color: C.ts, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Sign out</button>
         </div>
       </div>
@@ -808,7 +844,7 @@ export default function TradeOS() {
             {isLocked() ? `🔒 Locked · ${lockDays()} days remaining` : "💾 Save & Lock for 30 Days"}
           </button>
 
-          <button onClick={async () => { await sb.auth.signOut(); setAuthState("auth"); }} style={{ width: "100%", padding: 12, background: "transparent", border: `1px solid ${C.brd}`, borderRadius: 12, color: C.ts, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Sign Out</button>
+          <button onClick={async () => { if (sb) await sb.auth.signOut(); setAuthState("auth"); }} style={{ width: "100%", padding: 12, background: "transparent", border: `1px solid ${C.brd}`, borderRadius: 12, color: C.ts, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>Sign Out</button>
         </div>
       )}
 
