@@ -1,12 +1,20 @@
 "use client";
+export const dynamic = "force-dynamic";
 import { useState, useEffect, useCallback } from "react";
 import { createClient, SupabaseClient, User } from "@supabase/supabase-js";
 
-// ── Supabase client (uses NEXT_PUBLIC_ env vars, safe for browser) ─────────
-const sb: SupabaseClient = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+// ── Supabase client (lazy init to avoid SSR prerender crash) ──────────────
+let _sb: SupabaseClient | null = null;
+function getSb(): SupabaseClient {
+  if (!_sb) {
+    _sb = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    );
+  }
+  return _sb;
+}
+const sb = typeof window !== "undefined" ? getSb() : null as unknown as SupabaseClient;
 
 // ── Colors ────────────────────────────────────────────────────────────────
 const C = {
