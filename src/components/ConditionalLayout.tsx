@@ -12,12 +12,14 @@ import Footer from "./Footer";
 export default function ConditionalLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isAdminRoute = pathname?.startsWith("/admin");
+  const isTradeOS = pathname?.startsWith("/tradeos");
+  const hideChrome = isAdminRoute || isTradeOS;
 
   return (
     <>
       {!isAdminRoute && <Navbar />}
       {children}
-      {!isAdminRoute && <Footer />}
+      {!hideChrome && <Footer />}
     </>
   );
 }
