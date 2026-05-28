@@ -29,6 +29,17 @@ const C = {
 
 type Screen = "dashboard" | "trades" | "analytics" | "calendar" | "leaderboard" | "settings";
 
+interface Profile {
+  display_name: string;
+  username: string;
+  country: string;
+  avatar_url: string;
+  primary_asset: string;
+  public_profile: boolean;
+  onboarded: boolean;
+  plan: string;
+}
+
 // helper for db row → Trade
 function rowToTrade(r: Record<string, unknown>): Trade {
   return {
@@ -97,7 +108,8 @@ export default function NeeyumJournal() {
   const [showAdd, setShowAdd] = useState(false);
   const [editTrade, setEditTrade] = useState<Trade | null>(null);
   const [assetFilter, setAssetFilter] = useState<AssetClass | "all">("all");
-  const [profile, setProfile] = useState<{ country: string; public_profile: boolean; plan: string } | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [showOnboard, setShowOnboard] = useState(false);
 
   // Auth
   useEffect(() => {
@@ -120,8 +132,15 @@ export default function NeeyumJournal() {
       try {
         const { data } = await sb.from("nj_trades").select("*").eq("user_id", user.id).order("trade_date", { ascending: false });
         if (data) setTrades(data.map(rowToTrade));
-        const { data: prof } = await sb.from("nj_profiles").select("country,public_profile,plan").eq("id", user.id).single();
-        if (prof) setProfile(prof as { country: string; public_profile: boolean; plan: string });
+        const { data: prof } = await sb.from("nj_profiles").select("display_name,username,country,avatar_url,primary_asset,public_profile,onboarded,plan").eq("id", user.id).single();
+        if (prof) {
+          const pr = prof as Profile;
+          setProfile(pr);
+          if (!pr.onboarded) setShowOnboard(true);
+        } else {
+          // No profile row yet — show onboarding
+          setShowOnboard(true);
+        }
       } catch (e) { console.error(e); }
     })();
   }, [sb, user]);
@@ -194,10 +213,10 @@ export default function NeeyumJournal() {
         @keyframes njspin { to { transform: rotate(360deg); } }
       `}</style>
 
-      <TopBar {...{ C, user, scr }} />
+      <TopBar {...{ C, user, scr, setScr, avatarUrl: profile?.avatar_url }} />
 
       <div className="nj-shell" style={{ padding: "16px 14px 100px" }}>
-        {scr === "dashboard" && <Dashboard {...{ C, trades: fTrades, closed, assetFilter, setAssetFilter, setShowAdd, profile }} />}
+        {scr === "dashboard" && <Dashboard {...{ C, trades: fTrades, closed, assetFilter, setAssetFilter, setShowAdd, setEditTrade, profile }} />}
         {scr === "trades" && <TradesList {...{ C, trades: fTrades, assetFilter, setAssetFilter, setShowAdd, setEditTrade, removeTrade }} />}
         {scr === "analytics" && <Analytics {...{ C, closed }} />}
         {scr === "calendar" && <CalendarView {...{ C, closed }} />}
@@ -207,6 +226,10 @@ export default function NeeyumJournal() {
 
       {(showAdd || editTrade) && (
         <TradeModal {...{ C, onClose: () => { setShowAdd(false); setEditTrade(null); }, onSave: (t: Trade) => { saveTrade(t); setShowAdd(false); setEditTrade(null); }, editTrade }} />
+      )}
+
+      {showOnboard && (
+        <OnboardModal {...{ C, sb, user, profile, onDone: (pr: Profile) => { setProfile(pr); setShowOnboard(false); } }} />
       )}
 
       <BottomNav {...{ C, scr, setScr, setShowAdd }} />
@@ -272,7 +295,7 @@ function authInput(C: Record<string, string>): React.CSSProperties {
 }
 
 // ── Top Bar ───────────────────────────────────────────────────────────────
-function TopBar(p: { C: Record<string, string>; user: User | null; scr: string }) {
+function TopBar(p: { C: Record<string, string>; user: User | null; scr: string; setScr: (s: Screen) => void; avatarUrl?: string }) {
   const { C } = p;
   const titles: Record<string, string> = { dashboard: "Dashboard", trades: "Trades", analytics: "Analytics", calendar: "Calendar", leaderboard: "Leaderboard", settings: "Settings" };
   return (
@@ -283,7 +306,11 @@ function TopBar(p: { C: Record<string, string>; user: User | null; scr: string }
           <div style={{ fontSize: 9, color: C.ts, letterSpacing: "0.15em" }}>NEEYUM JOURNAL</div>
           <div style={{ fontSize: 16, fontWeight: 800 }}>{titles[p.scr] || "Journal"}</div>
         </div>
-        <div style={{ width: 32, height: 32, borderRadius: "50%", background: `linear-gradient(135deg,${C.amb},${C.pink})`, flexShrink: 0 }} title={p.user?.email || ""} />
+        <button onClick={() => p.setScr("settings")} aria-label="Settings" style={{ width: 36, height: 36, borderRadius: "50%", border: p.scr === "settings" ? `2px solid ${C.purL}` : "2px solid transparent", padding: 0, cursor: "pointer", background: "transparent", flexShrink: 0, overflow: "hidden" }}>
+          {p.avatarUrl
+            ? <img src={p.avatarUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%", display: "block" }} />
+            : <div style={{ width: "100%", height: "100%", borderRadius: "50%", background: `linear-gradient(135deg,${C.amb},${C.pink})` }} title={p.user?.email || ""} />}
+        </button>
       </div>
     </div>
   );
@@ -329,8 +356,9 @@ function Pill(p: { C: Record<string, string>; active: boolean; onClick: () => vo
 }
 
 // ── Dashboard ───────────────────────────────────────────────────────────────
-function Dashboard(p: { C: Record<string, string>; trades: Trade[]; closed: Trade[]; assetFilter: AssetClass | "all"; setAssetFilter: (v: AssetClass | "all") => void; setShowAdd: (b: boolean) => void; profile: { country: string; public_profile: boolean; plan: string } | null }) {
+function Dashboard(p: { C: Record<string, string>; trades: Trade[]; closed: Trade[]; assetFilter: AssetClass | "all"; setAssetFilter: (v: AssetClass | "all") => void; setShowAdd: (b: boolean) => void; setEditTrade: (t: Trade) => void; profile: Profile | null }) {
   const { C, closed } = p;
+  const open = useMemo(() => p.trades.filter(t => !t.is_closed), [p.trades]);
   const cur = p.assetFilter === "all" ? "INR" : assetCfg(p.assetFilter as AssetClass).currency;
   const totalPnl = closed.reduce((a, t) => a + t.pnl, 0);
   const wins = closed.filter(t => t.pnl >= 0).length;
@@ -372,13 +400,35 @@ function Dashboard(p: { C: Record<string, string>; trades: Trade[]; closed: Trad
         <BBar C={C} label="🛡 Risk Control" val={bScore.risk} max={25} grad={`linear-gradient(90deg,${C.blu},${C.bluL})`} last />
       </div>
 
+      {/* Open positions */}
+      {open.length > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>🟡 Open Positions</div>
+            <span style={{ fontSize: 10, color: C.amb, background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.25)", padding: "2px 8px", borderRadius: 20, fontWeight: 700 }}>{open.length} running</span>
+          </div>
+          {open.map(t => (
+            <div key={t.id} onClick={() => p.setEditTrade(t)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", background: "rgba(245,158,11,0.05)", border: "1px solid rgba(245,158,11,0.2)", borderRadius: 12, marginBottom: 8, cursor: "pointer" }}>
+              <span style={{ fontSize: 9, fontWeight: 700, padding: "3px 7px", borderRadius: 6, background: "rgba(245,158,11,0.15)", color: C.ambL, flexShrink: 0 }}>{assetCfg(t.asset_class).label}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.symbol}</div>
+                <div style={{ fontSize: 10, color: C.ts, display: "flex", gap: 8, marginTop: 3 }}>
+                  <span>{t.side === "long" ? "📈 LONG" : "📉 SHORT"}</span><span>{t.qty} @ {t.entry_price}</span>
+                </div>
+              </div>
+              <span style={{ fontSize: 11, color: C.amb, fontWeight: 700, flexShrink: 0 }}>Tap to close →</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Recent trades */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div style={{ fontSize: 14, fontWeight: 700 }}>Recent Trades</div>
         <button onClick={() => p.setShowAdd(true)} style={{ background: `linear-gradient(135deg,${C.pur},${C.purD})`, border: "none", color: "#fff", padding: "7px 14px", borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>+ Add Trade</button>
       </div>
-      {closed.length === 0 && <div style={{ textAlign: "center", padding: "40px 20px", color: C.ts, fontSize: 13 }}>No trades yet. Tap <strong style={{ color: C.purL }}>+ Add Trade</strong> to log your first.</div>}
-      {p.trades.slice(0, 6).map(t => <TradeRow key={t.id} C={C} t={t} />)}
+      {closed.length === 0 && open.length === 0 && <div style={{ textAlign: "center", padding: "40px 20px", color: C.ts, fontSize: 13 }}>No trades yet. Tap <strong style={{ color: C.purL }}>+ Add Trade</strong> to log your first.</div>}
+      {closed.slice(0, 6).map(t => <TradeRow key={t.id} C={C} t={t} onClick={() => p.setEditTrade(t)} />)}
     </div>
   );
 }
@@ -424,14 +474,18 @@ function TradeRow(p: { C: Record<string, string>; t: Trade; onClick?: () => void
         <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.symbol}</div>
         <div style={{ fontSize: 10, color: C.ts, display: "flex", gap: 8, marginTop: 3 }}>
           <span>{t.side === "long" ? "📈" : "📉"} {t.qty}</span>
-          <span>@ {t.entry_price} → {t.exit_price}</span>
+          <span>@ {t.entry_price}{t.is_closed ? ` → ${t.exit_price}` : ""}</span>
         </div>
       </div>
-      <div style={{ textAlign: "right", flexShrink: 0 }}>
-        <div style={{ fontSize: 15, fontWeight: 800, color: t.pnl >= 0 ? C.grn : C.red, fontVariantNumeric: "tabular-nums" }}>{fmtMoney(t.pnl, t.currency)}</div>
-        {t.rr != null && <div style={{ fontSize: 10, color: C.ts }}>{t.rr > 0 ? "+" : ""}{t.rr}R</div>}
-      </div>
-      {t.grade && <div style={{ width: 26, height: 26, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, background: `${gradeColors[t.grade]}22`, color: gradeColors[t.grade], flexShrink: 0 }}>{t.grade}</div>}
+      {t.is_closed ? (
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: t.pnl >= 0 ? C.grn : C.red, fontVariantNumeric: "tabular-nums" }}>{fmtMoney(t.pnl, t.currency)}</div>
+          {t.rr != null && <div style={{ fontSize: 10, color: C.ts }}>{t.rr > 0 ? "+" : ""}{t.rr}R</div>}
+        </div>
+      ) : (
+        <span style={{ fontSize: 9, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: "rgba(245,158,11,0.15)", color: C.ambL, flexShrink: 0 }}>OPEN</span>
+      )}
+      {t.is_closed && t.grade && <div style={{ width: 26, height: 26, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, background: `${gradeColors[t.grade]}22`, color: gradeColors[t.grade], flexShrink: 0 }}>{t.grade}</div>}
     </div>
   );
 }
@@ -464,18 +518,19 @@ function TradeModal(p: { C: Record<string, string>; onClose: () => void; onSave:
   const [followedPlan, setFollowedPlan] = useState<boolean | undefined>(e?.followed_plan);
   const [grade, setGrade] = useState(e?.grade || "");
   const [lesson, setLesson] = useState(e?.lesson || "");
+  const [isClosed, setIsClosed] = useState<boolean>(e ? (e.is_closed ?? true) : true);
   const [err, setErr] = useState("");
 
   const en = parseFloat(entry) || 0, ex = parseFloat(exit) || 0, q = parseFloat(qty) || 0, sln = parseFloat(sl) || 0;
-  const pnl = computePnl(side, en, ex, q);
-  const pnlPct = computePnlPct(side, en, ex);
-  const rr = computeRR(side, en, ex, sln || undefined);
+  const pnl = isClosed ? computePnl(side, en, ex, q) : 0;
+  const pnlPct = isClosed ? computePnlPct(side, en, ex) : 0;
+  const rr = isClosed ? computeRR(side, en, ex, sln || undefined) : undefined;
 
   const save = () => {
     if (!symbol.trim()) return setErr("Enter symbol");
     if (!q) return setErr("Enter quantity");
     if (!en) return setErr("Enter entry price");
-    if (!ex) return setErr("Enter exit price");
+    if (isClosed && !ex) return setErr("Enter exit price (or mark as Open position)");
     const t: Trade = {
       id: e?.id || `nj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       asset_class: ac, symbol: symbol.trim().toUpperCase(), side,
@@ -483,10 +538,10 @@ function TradeModal(p: { C: Record<string, string>; onClose: () => void; onSave:
       expiry: cfg.hasExpiry ? (expiry || undefined) : undefined,
       option_type: cfg.hasStrike ? optType : undefined,
       leverage: cfg.hasLeverage ? (parseFloat(lev) || undefined) : undefined,
-      qty: q, entry_price: en, exit_price: ex, sl: sln || undefined, target: parseFloat(target) || undefined,
-      entry_time: new Date(entryTime).toISOString(), exit_time: new Date(exitTime).toISOString(),
+      qty: q, entry_price: en, exit_price: isClosed ? ex : 0, sl: sln || undefined, target: parseFloat(target) || undefined,
+      entry_time: new Date(entryTime).toISOString(), exit_time: isClosed ? new Date(exitTime).toISOString() : undefined,
       trade_date: entryTime.slice(0, 10),
-      pnl, pnl_pct: pnlPct, rr: rr ?? undefined, currency: cfg.currency, is_closed: true,
+      pnl, pnl_pct: pnlPct, rr: rr ?? undefined, currency: cfg.currency, is_closed: isClosed,
       setup: setup || undefined, emotion_entry: emotion || undefined,
       confidence: parseFloat(confidence) || undefined, followed_plan: followedPlan,
       grade: grade || undefined, mistakes, lesson: lesson || undefined, thesis: thesis || undefined,
@@ -498,7 +553,7 @@ function TradeModal(p: { C: Record<string, string>; onClose: () => void; onSave:
     <div onClick={p.onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", backdropFilter: "blur(6px)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center", padding: "0" }}>
       <div onClick={ev => ev.stopPropagation()} style={{ background: C.bg2, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, width: "100%", maxWidth: 640, maxHeight: "94vh", overflowY: "auto", border: `1px solid ${C.brd2}` }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
-          <div><div style={{ fontSize: 10, color: C.ts, letterSpacing: "0.1em" }}>LOG TRADE</div><div style={{ fontSize: 20, fontWeight: 800 }}>{e ? "Edit Trade" : "Add Trade"}</div></div>
+          <div><div style={{ fontSize: 10, color: C.ts, letterSpacing: "0.1em" }}>{e && !e.is_closed ? "MANAGE POSITION" : "LOG TRADE"}</div><div style={{ fontSize: 20, fontWeight: 800 }}>{e ? (e.is_closed ? "Edit Trade" : "Close / Edit Position") : "Add Trade"}</div></div>
           <button onClick={p.onClose} style={{ width: 32, height: 32, background: "rgba(255,255,255,0.05)", border: "none", color: C.tp, fontSize: 18, borderRadius: 8, cursor: "pointer" }}>×</button>
         </div>
 
@@ -528,6 +583,13 @@ function TradeModal(p: { C: Record<string, string>; onClose: () => void; onSave:
         {/* Symbol */}
         <Label C={C}>Symbol</Label>
         <input value={symbol} onChange={ev => setSymbol(ev.target.value)} placeholder={cfg.symbolHint} style={{ ...inp(C), marginBottom: 14 }} />
+
+        {/* Position status: Open vs Closed */}
+        <Label C={C}>Position Status</Label>
+        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+          <button onClick={() => setIsClosed(false)} style={{ flex: 1, padding: 11, background: !isClosed ? "rgba(245,158,11,0.18)" : "rgba(255,255,255,0.03)", border: `1px solid ${!isClosed ? C.amb : C.brd2}`, color: !isClosed ? C.ambL : C.tm, borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>🟡 Open (still running)</button>
+          <button onClick={() => setIsClosed(true)} style={{ flex: 1, padding: 11, background: isClosed ? "rgba(16,185,129,0.18)" : "rgba(255,255,255,0.03)", border: `1px solid ${isClosed ? C.grn : C.brd2}`, color: isClosed ? C.grnL : C.tm, borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ Closed (squared off)</button>
+        </div>
 
         {/* F&O / options specific */}
         {cfg.hasStrike && (
@@ -562,9 +624,9 @@ function TradeModal(p: { C: Record<string, string>; onClose: () => void; onSave:
         {cfg.hasLeverage && (<div style={{ marginBottom: 14 }}><Label C={C}>Leverage (x)</Label><input type="number" value={lev} onChange={ev => setLev(ev.target.value)} placeholder="10" style={inp(C)} /></div>)}
 
         {/* Prices */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isClosed ? "1fr 1fr" : "1fr", gap: 10, marginBottom: 14 }}>
           <div><Label C={C}>Entry Price</Label><input type="number" step="any" value={entry} onChange={ev => setEntry(ev.target.value)} style={inp(C)} /></div>
-          <div><Label C={C}>Exit Price</Label><input type="number" step="any" value={exit} onChange={ev => setExit(ev.target.value)} style={inp(C)} /></div>
+          {isClosed && <div><Label C={C}>Exit Price</Label><input type="number" step="any" value={exit} onChange={ev => setExit(ev.target.value)} style={inp(C)} /></div>}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
           <div><Label C={C}>Stop Loss</Label><input type="number" step="any" value={sl} onChange={ev => setSl(ev.target.value)} placeholder="—" style={inp(C)} /></div>
@@ -572,9 +634,9 @@ function TradeModal(p: { C: Record<string, string>; onClose: () => void; onSave:
         </div>
 
         {/* Times */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isClosed ? "1fr 1fr" : "1fr", gap: 10, marginBottom: 14 }}>
           <div><Label C={C}>Entry Time</Label><input type="datetime-local" value={entryTime} onChange={ev => setEntryTime(ev.target.value)} style={inp(C)} /></div>
-          <div><Label C={C}>Exit Time</Label><input type="datetime-local" value={exitTime} onChange={ev => setExitTime(ev.target.value)} style={inp(C)} /></div>
+          {isClosed && <div><Label C={C}>Exit Time</Label><input type="datetime-local" value={exitTime} onChange={ev => setExitTime(ev.target.value)} style={inp(C)} /></div>}
         </div>
 
         {/* Live preview */}
@@ -857,7 +919,7 @@ function CalendarView(p: { C: Record<string, string>; closed: Trade[] }) {
 
 // ── Leaderboard ─────────────────────────────────────────────────────────────
 interface LBRow { user_id: string; display_name: string; username: string; country: string; total_trades: number; win_rate: number; total_pnl: number; avg_pnl_pct: number; behaviour_score: number; }
-function Leaderboard(p: { C: Record<string, string>; sb: SupabaseClient | null; user: User | null; profile: { country: string; public_profile: boolean; plan: string } | null }) {
+function Leaderboard(p: { C: Record<string, string>; sb: SupabaseClient | null; user: User | null; profile: Profile | null }) {
   const { C } = p;
   const [mode, setMode] = useState<"behaviour" | "pnl">("behaviour");
   const [countryF, setCountryF] = useState("ALL");
@@ -955,18 +1017,178 @@ function lbTab(C: Record<string, string>, active: boolean): React.CSSProperties 
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────
-function Settings(p: { C: Record<string, string>; sb: SupabaseClient | null; user: User | null; profile: { country: string; public_profile: boolean; plan: string } | null; setProfile: (pr: { country: string; public_profile: boolean; plan: string }) => void; trades: Trade[] }) {
+// ── Shared avatar upload helper ──────────────────────────────────────────────
+async function uploadAvatar(sb: SupabaseClient, userId: string, file: File): Promise<string | null> {
+  try {
+    const ext = file.name.split(".").pop() || "jpg";
+    const path = `${userId}/avatar_${Date.now()}.${ext}`;
+    const { error } = await sb.storage.from("avatars").upload(path, file, { upsert: true, cacheControl: "3600" });
+    if (error) { console.error("[NJ] avatar upload:", error); return null; }
+    const { data } = sb.storage.from("avatars").getPublicUrl(path);
+    return data.publicUrl;
+  } catch (e) { console.error(e); return null; }
+}
+
+// ── Profile form fields (shared by Onboarding + Settings) ────────────────────
+function ProfileFields(p: {
+  C: Record<string, string>; sb: SupabaseClient | null; userId: string;
+  name: string; setName: (s: string) => void;
+  username: string; setUsername: (s: string) => void;
+  country: string; setCountry: (s: string) => void;
+  primaryAsset: string; setPrimaryAsset: (s: string) => void;
+  avatarUrl: string; setAvatarUrl: (s: string) => void;
+}) {
   const { C } = p;
+  const [uploading, setUploading] = useState(false);
+
+  const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !p.sb) return;
+    if (file.size > 3 * 1024 * 1024) { alert("Image must be under 3MB"); return; }
+    setUploading(true);
+    const url = await uploadAvatar(p.sb, p.userId, file);
+    if (url) p.setAvatarUrl(url);
+    else alert("Upload failed. Make sure the avatars storage bucket exists.");
+    setUploading(false);
+  };
+
+  return (
+    <div>
+      {/* Avatar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+        <div style={{ width: 64, height: 64, borderRadius: "50%", overflow: "hidden", background: `linear-gradient(135deg,${C.amb},${C.pink})`, flexShrink: 0, border: `2px solid ${C.brd2}` }}>
+          {p.avatarUrl && <img src={p.avatarUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />}
+        </div>
+        <div style={{ flex: 1 }}>
+          <label style={{ display: "inline-block", padding: "9px 14px", background: "rgba(124,92,252,0.12)", border: `1px solid ${C.pur}`, color: C.purL, borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            {uploading ? "Uploading…" : p.avatarUrl ? "Change Photo" : "📷 Upload Photo"}
+            <input type="file" accept="image/*" onChange={onPick} style={{ display: "none" }} />
+          </label>
+          <div style={{ fontSize: 10, color: C.ts, marginTop: 6 }}>JPG/PNG, under 3MB</div>
+        </div>
+      </div>
+
+      <Label C={C}>Display Name</Label>
+      <input value={p.name} onChange={e => p.setName(e.target.value)} placeholder="Your name" style={{ ...inp(C), marginBottom: 14 }} />
+
+      <Label C={C}>Username (public handle)</Label>
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <span style={{ position: "absolute", left: 13, top: 11, color: C.ts, fontSize: 13 }}>@</span>
+        <input value={p.username} onChange={e => p.setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ""))} placeholder="handle" style={{ ...inp(C), paddingLeft: 26 }} />
+      </div>
+
+      <Label C={C}>Country</Label>
+      <select value={p.country} onChange={e => p.setCountry(e.target.value)} style={{ ...inp(C), marginBottom: 14 }}>
+        {COUNTRIES.map(c => <option key={c.code} value={c.code} style={{ background: C.bg2 }}>{c.flag} {c.name}</option>)}
+      </select>
+
+      <Label C={C}>Primary Asset Focus</Label>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+        {ASSET_CLASSES.map(a => (
+          <button key={a.key} onClick={() => p.setPrimaryAsset(a.key)} style={{ padding: "7px 11px", background: p.primaryAsset === a.key ? "rgba(124,92,252,0.15)" : "rgba(255,255,255,0.03)", border: `1px solid ${p.primaryAsset === a.key ? C.pur : C.brd2}`, color: p.primaryAsset === a.key ? C.purL : C.tm, borderRadius: 18, fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>{a.flag} {a.label}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Onboarding Modal (first run after Google login) ──────────────────────────
+function OnboardModal(p: { C: Record<string, string>; sb: SupabaseClient | null; user: User | null; profile: Profile | null; onDone: (pr: Profile) => void }) {
+  const { C } = p;
+  const defaultName = p.profile?.display_name || (p.user?.email ? p.user.email.split("@")[0] : "");
+  const [name, setName] = useState(defaultName);
+  const [username, setUsername] = useState(p.profile?.username || (p.user?.email ? p.user.email.split("@")[0].toLowerCase().replace(/[^a-z0-9_]/g, "") : ""));
   const [country, setCountry] = useState(p.profile?.country || "IN");
+  const [primaryAsset, setPrimaryAsset] = useState(p.profile?.primary_asset || "in_fno");
+  const [avatarUrl, setAvatarUrl] = useState(p.profile?.avatar_url || "");
+  const [pub, setPub] = useState(p.profile?.public_profile ?? true);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  const finish = async () => {
+    if (!name.trim()) return setErr("Enter your name");
+    if (!username.trim()) return setErr("Pick a username");
+    if (!p.sb || !p.user) return setErr("Not connected");
+    setSaving(true); setErr("");
+    const row = {
+      id: p.user.id, display_name: name.trim(), username: username.trim(),
+      country, primary_asset: primaryAsset, avatar_url: avatarUrl || null,
+      public_profile: pub, onboarded: true,
+    };
+    const { error } = await p.sb.from("nj_profiles").upsert(row, { onConflict: "id" });
+    if (error) {
+      if (error.message?.includes("duplicate") || error.code === "23505") setErr("That username is taken, try another");
+      else setErr(error.message || "Could not save");
+      setSaving(false);
+      return;
+    }
+    p.onDone({ display_name: name.trim(), username: username.trim(), country, primary_asset: primaryAsset, avatar_url: avatarUrl, public_profile: pub, onboarded: true, plan: p.profile?.plan || "free" });
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", backdropFilter: "blur(6px)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: C.bg2, borderRadius: 20, padding: 24, width: "100%", maxWidth: 460, maxHeight: "94vh", overflowY: "auto", border: `1px solid ${C.brd2}` }}>
+        <div style={{ textAlign: "center", marginBottom: 20 }}>
+          <div style={{ width: 48, height: 48, borderRadius: 13, background: `linear-gradient(135deg,${C.pur},${C.blu})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 800, color: "#fff", margin: "0 auto 12px" }}>N</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>Welcome to Neeyum Journal</div>
+          <div style={{ fontSize: 12, color: C.ts, marginTop: 4 }}>Set up your trader profile to get started</div>
+        </div>
+
+        {err && <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "10px 14px", color: C.redL, fontSize: 12, marginBottom: 14 }}>{err}</div>}
+
+        <ProfileFields {...{ C, sb: p.sb, userId: p.user?.id || "", name, setName, username, setUsername, country, setCountry, primaryAsset, setPrimaryAsset, avatarUrl, setAvatarUrl }} />
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 0 4px" }}>
+          <div><div style={{ fontSize: 13, fontWeight: 600 }}>Show on Leaderboard</div><div style={{ fontSize: 11, color: C.ts }}>Compete globally by behaviour & P&L</div></div>
+          <button onClick={() => setPub(!pub)} style={{ width: 46, height: 26, borderRadius: 13, background: pub ? C.pur : "rgba(255,255,255,0.1)", border: "none", cursor: "pointer", position: "relative" }}>
+            <div style={{ width: 20, height: 20, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: pub ? 23 : 3, transition: "all 0.2s" }} />
+          </button>
+        </div>
+
+        <button onClick={finish} disabled={saving} style={{ width: "100%", padding: 14, background: `linear-gradient(135deg,${C.pur},${C.purD})`, border: "none", color: "#fff", borderRadius: 12, fontWeight: 700, fontSize: 14, cursor: "pointer", marginTop: 12 }}>
+          {saving ? "Setting up…" : "Start Journaling →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Settings ────────────────────────────────────────────────────────────────
+function Settings(p: { C: Record<string, string>; sb: SupabaseClient | null; user: User | null; profile: Profile | null; setProfile: (pr: Profile) => void; trades: Trade[] }) {
+  const { C } = p;
+  const [name, setName] = useState(p.profile?.display_name || "");
+  const [username, setUsername] = useState(p.profile?.username || "");
+  const [country, setCountry] = useState(p.profile?.country || "IN");
+  const [primaryAsset, setPrimaryAsset] = useState(p.profile?.primary_asset || "in_fno");
+  const [avatarUrl, setAvatarUrl] = useState(p.profile?.avatar_url || "");
   const [pub, setPub] = useState(p.profile?.public_profile ?? true);
   const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
 
-  useEffect(() => { if (p.profile) { setCountry(p.profile.country); setPub(p.profile.public_profile); } }, [p.profile]);
+  useEffect(() => {
+    if (p.profile) {
+      setName(p.profile.display_name || ""); setUsername(p.profile.username || "");
+      setCountry(p.profile.country || "IN"); setPrimaryAsset(p.profile.primary_asset || "in_fno");
+      setAvatarUrl(p.profile.avatar_url || ""); setPub(p.profile.public_profile ?? true);
+    }
+  }, [p.profile]);
 
   const save = async () => {
     if (!p.sb || !p.user) return;
-    await p.sb.from("nj_profiles").update({ country, public_profile: pub }).eq("id", p.user.id);
-    p.setProfile({ country, public_profile: pub, plan: p.profile?.plan || "free" });
+    if (!name.trim()) return setErr("Enter your name");
+    if (!username.trim()) return setErr("Pick a username");
+    setErr("");
+    const { error } = await p.sb.from("nj_profiles").upsert({
+      id: p.user.id, display_name: name.trim(), username: username.trim(),
+      country, primary_asset: primaryAsset, avatar_url: avatarUrl || null,
+      public_profile: pub, onboarded: true,
+    }, { onConflict: "id" });
+    if (error) {
+      if (error.message?.includes("duplicate") || error.code === "23505") setErr("That username is taken");
+      else setErr(error.message || "Save failed");
+      return;
+    }
+    p.setProfile({ display_name: name.trim(), username: username.trim(), country, primary_asset: primaryAsset, avatar_url: avatarUrl, public_profile: pub, onboarded: true, plan: p.profile?.plan || "free" });
     setSaved(true); setTimeout(() => setSaved(false), 2000);
   };
   const logout = async () => { if (p.sb) await p.sb.auth.signOut(); };
@@ -974,12 +1196,10 @@ function Settings(p: { C: Record<string, string>; sb: SupabaseClient | null; use
   return (
     <div>
       <div style={{ background: C.panel, border: `1px solid ${C.brd}`, borderRadius: 14, padding: 16, marginBottom: 12 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>👤 Profile</div>
-        <Label C={C}>Country (for leaderboard)</Label>
-        <select value={country} onChange={e => setCountry(e.target.value)} style={{ ...inp(C), marginBottom: 14 }}>
-          {COUNTRIES.map(c => <option key={c.code} value={c.code} style={{ background: C.bg2 }}>{c.flag} {c.name}</option>)}
-        </select>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>👤 Edit Profile</div>
+        {err && <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "10px 14px", color: C.redL, fontSize: 12, marginBottom: 14 }}>{err}</div>}
+        <ProfileFields {...{ C, sb: p.sb, userId: p.user?.id || "", name, setName, username, setUsername, country, setCountry, primaryAsset, setPrimaryAsset, avatarUrl, setAvatarUrl }} />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0 6px", marginTop: 4, borderTop: `1px solid ${C.brd}` }}>
           <div><div style={{ fontSize: 13, fontWeight: 600 }}>Public Profile</div><div style={{ fontSize: 11, color: C.ts }}>Appear on global leaderboard</div></div>
           <button onClick={() => setPub(!pub)} style={{ width: 46, height: 26, borderRadius: 13, background: pub ? C.pur : "rgba(255,255,255,0.1)", border: "none", cursor: "pointer", position: "relative", transition: "all 0.2s" }}>
             <div style={{ width: 20, height: 20, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: pub ? 23 : 3, transition: "all 0.2s" }} />
